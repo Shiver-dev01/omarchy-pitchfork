@@ -12,9 +12,17 @@
 //                            made non-interactive, so it cannot move at all
 //   rows >  maxVisibleRows   one row short of the cap plus half of the next,
 //                            so the cut-off row is itself the affordance
+//
+// The screen has the last word on both the side the popup opens on and how
+// much of that policy survives. A bar at the bottom of the display puts the
+// panel's lowest control a few pixels above the edge, so a menu that only ever
+// opened downward lost most of its rows off the end of the screen -- and to no
+// scrollbar, because the list itself was not overflowing. See
+// measurePlacement.
 
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Window
 import qs.Commons
 import qs.Ui
 
@@ -44,15 +52,69 @@ Item {
     // keyboard cursor paints the trigger through this rather than through Qt
     // focus.
     property bool hasCursor: false
+    // How close the popup may come to the edge of the screen before it is
+    // shortened. The same gap the panel itself keeps from the bar.
+    property int edgeMargin: Style.gapsOut
     readonly property var popupBorderSpec: Border.localOrSurfaceSpec("popups", "border", root.popupBorder, Color.popups.border, Style.normalBorderWidth)
     readonly property bool popupOpen: popup.opened
     readonly property int rowCount: root.options.length
-    readonly property bool overflowing: root.rowCount > root.maxVisibleRows
     readonly property real rowStep: root.popupRowHeight + root.rowSpacing
-    readonly property real listHeight: root.overflowing ? (root.maxVisibleRows - 1) * root.rowStep + root.popupRowHeight / 2 : Math.max(root.popupRowHeight, root.rowCount * root.rowStep - root.rowSpacing)
+    // Every row at once, with no policy applied.
+    readonly property real fullListHeight: Math.max(root.popupRowHeight, root.rowCount * root.rowStep - root.rowSpacing)
+    // The policy above, before the screen has a say.
+    readonly property real naturalListHeight: root.rowCount > root.maxVisibleRows ? (root.maxVisibleRows - 1) * root.rowStep + root.popupRowHeight / 2 : root.fullListHeight
+    // Room the chosen side actually has for rows, set by measurePlacement on
+    // every open. Zero until the first measurement, which reads as "the screen
+    // has not constrained anything".
+    property real availableListHeight: 0
+    readonly property real listHeight: (root.availableListHeight > 0 && root.availableListHeight < root.naturalListHeight) ? root.snappedListHeight(root.availableListHeight) : root.naturalListHeight
+    // A list the screen forced shorter than its own content scrolls, even when
+    // the row count alone would have fitted the policy.
+    readonly property bool overflowing: root.listHeight < root.fullListHeight - 0.5
+    // Which side of the trigger the popup opens on.
+    property bool openUpward: false
+    readonly property real popupChrome: popup.topPadding + popup.bottomPadding
+    readonly property real popupOuterHeight: root.listHeight + root.popupChrome
 
     signal changed(string value)
     signal hovered(bool isHovered)
+
+    // Rounds a height the screen imposed down to the shape the policy already
+    // uses -- whole rows plus half of the next -- so a capped list still ends
+    // on the half row that says "there is more below" rather than on an
+    // arbitrary slice of one.
+    function snappedListHeight(available) {
+        var whole = Math.floor((available - root.popupRowHeight / 2) / root.rowStep);
+        if (whole < 1)
+            return Math.min(available, root.popupRowHeight);
+
+        return whole * root.rowStep + root.popupRowHeight / 2;
+    }
+
+    // Chooses the side and the cap, in window coordinates, once per open. A
+    // binding would not help: mapToItem is a one-shot, and the panel does not
+    // move while a menu is up.
+    function measurePlacement() {
+        var window = trigger.Window.window;
+        if (!window || window.height <= 0) {
+            root.openUpward = false;
+            root.availableListHeight = 0;
+            return ;
+        }
+
+        var top = trigger.mapToItem(null, 0, 0).y;
+        var gap = Style.spacing.xxs;
+        var roomBelow = Math.max(0, window.height - top - trigger.height - gap - root.edgeMargin);
+        var roomAbove = Math.max(0, top - gap - root.edgeMargin);
+        // Downward is where a dropdown is looked for, so it stays the default
+        // and the flip happens only when the menu does not fit there and the
+        // other side is roomier.
+        root.openUpward = roomBelow < root.naturalListHeight + root.popupChrome && roomAbove > roomBelow;
+        var room = root.openUpward ? roomAbove : roomBelow;
+        // Never below a row and a half. The half row is the scroll
+        // affordance, and a popup shorter than that states nothing at all.
+        root.availableListHeight = Math.max(root.rowStep + root.popupRowHeight / 2, room - root.popupChrome);
+    }
 
     function open() {
         popup.open();
@@ -170,7 +232,7 @@ Item {
                 id: popup
 
                 x: 0
-                y: trigger.height + Style.spacing.xxs
+                y: root.openUpward ? -(root.popupOuterHeight + Style.spacing.xxs) : trigger.height + Style.spacing.xxs
                 width: trigger.width
                 // The content box, not the outer height: the padding below is
                 // then added on top of it rather than eaten out of it.
@@ -181,6 +243,9 @@ Item {
                 topPadding: Border.top(root.popupBorderSpec) + Style.spacing.hairline
                 bottomPadding: Border.bottom(root.popupBorderSpec) + Style.spacing.hairline
                 focus: true
+                // Before the popup is shown, so the first frame is already on
+                // the right side of the trigger and already the right height.
+                onAboutToShow: root.measurePlacement()
                 onOpened: {
                     optionList.currentIndex = Math.max(0, optionList.indexOfValue(root.value));
                     optionList.positionViewAtIndex(optionList.currentIndex, ListView.Contain);
@@ -224,7 +289,10 @@ Item {
                     currentIndex: -1
                     clip: true
                     // A list that fits has nothing to scroll, so it does not
-                    // accept a drag or a wheel event either.
+                    // accept a drag or a wheel event either. "Fits" includes
+                    // the screen's verdict, not only the row count: a menu cut
+                    // short to reach the edge of the display must scroll even
+                    // when its four rows would have fitted the policy.
                     interactive: root.overflowing
                     boundsBehavior: Flickable.StopAtBounds
                     Keys.priority: Keys.BeforeItem
