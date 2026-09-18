@@ -9,7 +9,9 @@ BarWidget {
     readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
     readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
     readonly property bool inTune: panelLoader.item ? panelLoader.item.inTune === true : false
-    readonly property string readout: panelLoader.item ? panelLoader.item.barReadout : ""
+    // Instrument, tuning, and the note if one is sounding. With the panel
+    // closed the tooltip is the only place any of that is legible.
+    readonly property string readout: panelLoader.item ? panelLoader.item.barTooltip : ""
     // Bound directly rather than through WidgetButton's active/activeColor,
     // which is the urgent colour: being in tune is the opposite of urgent.
     readonly property color iconColor: root.inTune ? Color.accent : (root.bar ? root.bar.barForeground : Color.foreground)

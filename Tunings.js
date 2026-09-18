@@ -138,6 +138,190 @@ var tunings = [
     }
 ];
 
+// -- user-defined tunings ---------------------------------------------------
+//
+// Everything below takes an optional `custom` argument: an already-validated
+// array from parseCustomTunings, which the panel reads out of
+// ~/.config/omarchy-pitchfork/tunings.json. It is threaded through as a
+// parameter rather than held in a module variable on purpose -- a QML
+// JavaScript resource without `.pragma library` does not guarantee one shared
+// scope across component instances, and Pitchfork runs one panel per monitor.
+//
+// The accepted file is either a bare array of entries or { "tunings": [...] }.
+// An entry is:
+//
+//   { "id": "open-g", "label": "Open G",
+//     "strings": ["D2","G2","D3","G3","B3","D4"] }
+//
+// or, for something that is a transposition rather than a new voicing:
+//
+//   { "id": "eb-standard", "label": "E flat", "shift": -1 }
+//
+// `instruments` narrows which instruments an entry is offered for. A `strings`
+// entry without it is offered to every instrument with that many strings,
+// which is what makes a six-note voicing stay off a four-string bass.
+
+var CUSTOM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+// A voicing longer than this is not an instrument Pitchfork knows about, and
+// the strip that draws one row per string stops being readable well before it.
+var MAX_CUSTOM_STRINGS = 12;
+// Two octaves either way. Past that a "transposition" is a different
+// instrument, and the result would fall off the bottom of what the detector
+// can hear anyway.
+var MAX_CUSTOM_SHIFT = 24;
+
+function own(record, key) {
+    return record !== null && typeof record === "object" && Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function isBuiltinTuningId(id) {
+    for (var index = 0; index < tunings.length; index++) {
+        if (tunings[index].id === id)
+            return true;
+
+    }
+    return false;
+}
+
+// Instruments a bare voicing applies to: every one with the same number of
+// strings. Returning a list rather than null keeps the `only` check in
+// tuningApplies the single place that decides applicability.
+function instrumentsWithStringCount(count) {
+    var ids = [];
+    for (var index = 0; index < instruments.length; index++) {
+        if (instruments[index].strings.length === count)
+            ids.push(instruments[index].id);
+
+    }
+    return ids;
+}
+
+// One entry, or null if it is not usable. Every reason to reject is a reason
+// the tuning could not be tuned to: an id that collides silently replaces a
+// built-in, and a note name that does not parse would drop a string out of the
+// set with no way for the player to see which.
+function parseCustomTuning(entry, taken) {
+    if (!entry || typeof entry !== "object")
+        return null;
+
+    var id = asString(own(entry, "id") ? entry.id : "").trim();
+    if (!CUSTOM_ID_PATTERN.test(id) || isBuiltinTuningId(id) || taken.indexOf(id) !== -1)
+        return null;
+
+    var label = asString(own(entry, "label") ? entry.label : "").trim();
+    if (label.length === 0)
+        label = id;
+
+    var only = null;
+    if (own(entry, "instruments") && Array.isArray(entry.instruments)) {
+        only = [];
+        for (var index = 0; index < entry.instruments.length; index++) {
+            var instrument = instrumentById(entry.instruments[index]);
+            if (instrument && only.indexOf(instrument.id) === -1)
+                only.push(instrument.id);
+
+        }
+        // Named instruments that all failed to resolve is a typo, not a
+        // request to offer the tuning everywhere.
+        if (only.length === 0)
+            return null;
+
+    }
+
+    if (own(entry, "strings") && Array.isArray(entry.strings)) {
+        var voicing = [];
+        for (var noteIndex = 0; noteIndex < entry.strings.length; noteIndex++) {
+            var note = nameOf(midiOf(entry.strings[noteIndex]));
+            if (note === null)
+                return null;
+
+            voicing.push(note);
+        }
+        if (voicing.length === 0 || voicing.length > MAX_CUSTOM_STRINGS)
+            return null;
+
+        // A voicing replaces the string set outright, so offering a six-note
+        // one on a four-string bass would hand the player four strings that
+        // are not the ones in front of them. The string count decides
+        // applicability even where instruments were named explicitly -- a
+        // mismatch there is a typo in the file, not an instruction.
+        var fits = [];
+        var matching = instrumentsWithStringCount(voicing.length);
+        for (var fitIndex = 0; fitIndex < matching.length; fitIndex++) {
+            if (only === null || only.indexOf(matching[fitIndex]) !== -1)
+                fits.push(matching[fitIndex]);
+
+        }
+        if (fits.length === 0)
+            return null;
+
+        return {
+            id: id,
+            label: label,
+            voicing: voicing,
+            only: fits,
+            custom: true
+        };
+    }
+
+    if (own(entry, "shift")) {
+        var shift = Number(entry.shift);
+        if (!isFinite(shift) || Math.round(shift) !== shift || shift === 0 || Math.abs(shift) > MAX_CUSTOM_SHIFT)
+            return null;
+
+        var moved = {
+            id: id,
+            label: label,
+            shift: shift,
+            custom: true
+        };
+        if (only !== null)
+            moved.only = only;
+
+        return moved;
+    }
+
+    return null;
+}
+
+// The whole file. Accepts the parsed JSON value or the raw text, so the caller
+// can hand over whatever it has; anything unusable yields an empty list rather
+// than an error, because a tuner that refuses to open over a stray comma is
+// worse than one that quietly offers only its built-ins.
+function parseCustomTunings(source) {
+    var value = source;
+    if (typeof value === "string") {
+        try {
+            value = JSON.parse(value);
+        } catch (parseError) {
+            return [];
+        }
+    }
+
+    var list = Array.isArray(value) ? value : (own(value, "tunings") && Array.isArray(value.tunings) ? value.tunings : null);
+    if (list === null)
+        return [];
+
+    var rows = [];
+    var taken = [];
+    for (var index = 0; index < list.length; index++) {
+        var parsed = parseCustomTuning(list[index], taken);
+        if (parsed === null)
+            continue;
+
+        taken.push(parsed.id);
+        rows.push(parsed);
+    }
+    return rows;
+}
+
+// Built-ins first, then the file's entries in the order it lists them. A
+// custom id can never collide with a built-in -- parseCustomTuning rejects
+// that -- so this concatenation needs no further de-duplication.
+function allTunings(custom) {
+    return Array.isArray(custom) && custom.length > 0 ? tunings.concat(custom) : tunings;
+}
+
 // Stored settings from before the instrument and reference axes were split.
 // The panel used one flat preset id, and dropping these would silently reset a
 // player's choice on upgrade.
@@ -276,11 +460,12 @@ function instrumentById(id) {
     return null;
 }
 
-function tuningById(id) {
+function tuningById(id, custom) {
     var wanted = asString(id);
-    for (var index = 0; index < tunings.length; index++) {
-        if (tunings[index].id === wanted)
-            return tunings[index];
+    var rows = allTunings(custom);
+    for (var index = 0; index < rows.length; index++) {
+        if (rows[index].id === wanted)
+            return rows[index];
 
     }
     return null;
@@ -301,9 +486,9 @@ function tuningApplies(instrument, tuning) {
 }
 
 // What the reference row should say for this instrument. Only drop varies.
-function tuningLabel(instrumentId, tuningId) {
+function tuningLabel(instrumentId, tuningId, custom) {
     var instrument = instrumentById(instrumentId);
-    var tuning = tuningById(tuningId);
+    var tuning = tuningById(tuningId, custom);
     if (!tuning)
         return "";
 
@@ -339,16 +524,17 @@ function instrumentOptions(familyId) {
 
 // Empty when there is no instrument, or when nothing applies to it. A dropdown
 // with nothing in it is worse than no dropdown, so the panel hides the row.
-function tuningOptions(instrumentId) {
+function tuningOptions(instrumentId, custom) {
     var instrument = instrumentById(instrumentId);
+    var available = allTunings(custom);
     var rows = [];
-    for (var index = 0; index < tunings.length; index++) {
-        if (!tuningApplies(instrument, tunings[index]))
+    for (var index = 0; index < available.length; index++) {
+        if (!tuningApplies(instrument, available[index]))
             continue;
 
         rows.push({
-            value: tunings[index].id,
-            label: tuningLabel(instrumentId, tunings[index].id)
+            value: available[index].id,
+            label: tuningLabel(instrumentId, available[index].id, custom)
         });
     }
     return rows;
@@ -371,12 +557,12 @@ function familyOptions() {
 // the readout name the nearest semitone instead. A reference that does not
 // apply yields the instrument's own strings rather than an error, so a stale
 // combination degrades to something tunable.
-function stringsFor(instrumentId, tuningId) {
+function stringsFor(instrumentId, tuningId, custom) {
     var instrument = instrumentById(instrumentId);
     if (!instrument || instrument.strings.length === 0)
         return [];
 
-    var tuning = tuningById(tuningId);
+    var tuning = tuningById(tuningId, custom);
     if (!tuningApplies(instrument, tuning))
         return instrument.strings.slice();
 
@@ -413,7 +599,7 @@ function stringsFor(instrumentId, tuningId) {
 // instrument and the reference are only asked about when the family has them.
 // The sole exception is the historical `instrument: "chromatic"` sentinel,
 // which was itself the old spelling of the family choice.
-function normalize(stored) {
+function normalize(stored, custom) {
     var raw = (stored && typeof stored === "object") ? stored : {};
     var instrument = instrumentById(raw.instrument);
     var family = familyById(raw.family);
@@ -453,7 +639,7 @@ function normalize(stored) {
 
     var keeping = instrument && instrument.family === family.id;
     var instrumentId = keeping ? instrument.id : rows[0].value;
-    var tuningId = tuningApplies(instrumentById(instrumentId), tuningById(raw.tuning)) ? asString(raw.tuning) : DEFAULT_TUNING;
+    var tuningId = tuningApplies(instrumentById(instrumentId), tuningById(raw.tuning, custom)) ? asString(raw.tuning) : DEFAULT_TUNING;
     return {
         family: family.id,
         instrument: instrumentId,
@@ -525,6 +711,8 @@ var Tunings = {
     familyById: familyById,
     instrumentById: instrumentById,
     tuningById: tuningById,
+    allTunings: allTunings,
+    parseCustomTunings: parseCustomTunings,
     tuningApplies: tuningApplies,
     tuningLabel: tuningLabel,
     familyOptions: familyOptions,

@@ -48,6 +48,49 @@ and play a note.
   and fill in as each is played in tune.
 - In tune, the whole readout turns the accent colour — and so does the fork in
   the bar, so it reads at a glance with the panel closed.
+- The reading is captioned with the instrument and tuning it is being measured
+  against, and the bar tooltip carries the same line, so neither has to be
+  looked up in a dropdown.
+
+## Custom tunings
+
+Anything not in the built-in list goes in `~/.config/omarchy-pitchfork/tunings.json`.
+The file is optional, read at startup and again whenever it is saved, and its
+entries appear in the Tuning row underneath the built-in ones.
+
+```json
+{
+  "tunings": [
+    {
+      "id": "open-g",
+      "label": "Open G",
+      "instruments": ["guitar6"],
+      "strings": ["D2", "G2", "D3", "G3", "B3", "D4"]
+    },
+    {
+      "id": "two-steps-down",
+      "label": "Two steps down",
+      "shift": -4
+    }
+  ]
+}
+```
+
+- `id` is a slug, unique, and cannot be one the built-ins already use.
+- `label` is what the menu shows. It defaults to the id.
+- `strings` replaces the string set outright, low string first, sharps or flats.
+- `shift` moves every string instead, by a whole number of semitones.
+- Exactly one of `strings` or `shift`.
+- `instruments` narrows where the tuning is offered. A `strings` entry is only
+  ever offered on instruments with that many strings, so a six-note voicing
+  never appears on a four-string bass whether it names one or not.
+
+An entry that cannot be tuned to — a duplicate id, a note name that does not
+parse, a shift of zero — is skipped, and the rest of the file still loads. A
+file that is not valid JSON at all leaves you with the built-in tunings. If a
+tuning that is currently selected disappears from the file, the panel falls
+back to Standard without rewriting your stored choice, so putting the entry
+back restores it.
 
 A laptop's internal microphone is a poor input for this. Its noise floor is high
 enough that a quietly played instrument never becomes the most periodic thing in
@@ -73,7 +116,8 @@ Plugins run unsandboxed inside the long-lived shell process, so:
   binaries, and no privileged action.
 - At runtime, Pitchfork's own code writes exactly one file,
   `~/.config/omarchy-pitchfork/settings.json`; it does not write Omarchy's
-  configuration. Omarchy's install, enable, update, and remove commands manage
+  configuration. `tunings.json` in the same directory is read and watched for
+  changes, never written, so it stays yours to edit. Omarchy's install, enable, update, and remove commands manage
   the plugin registration outside that runtime boundary.
 
 ## Development

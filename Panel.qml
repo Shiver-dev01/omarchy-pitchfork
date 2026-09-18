@@ -51,12 +51,12 @@ Panel {
     // opened. Assigned rather than mutated in place, because QML only notifies
     // a var property on assignment.
     property var checkedTargets: []
-    readonly property var targets: Tunings.stringsFor(root.selectedInstrument, root.selectedTuning)
+    readonly property var targets: Tunings.stringsFor(root.selectedInstrument, root.selectedTuning, root.customTunings)
     readonly property var familyOptions: Tunings.familyOptions()
     readonly property var instrumentOptions: Tunings.instrumentOptions(root.selectedFamily)
     // Both empty under chromatic: no instrument to pick, and so no reference
     // for one. The rows are hidden rather than shown empty.
-    readonly property var tuningOptions: Tunings.tuningOptions(root.selectedInstrument)
+    readonly property var tuningOptions: Tunings.tuningOptions(root.selectedInstrument, root.customTunings)
     // Tunings.js owns every pitch calculation the panel makes. One
     // implementation is the point: a readout and a string list that derive the
     // same note two different ways will eventually disagree about it.
@@ -96,6 +96,21 @@ Panel {
     // Empty when there is nothing to report, so the bar widget can decide what
     // an idle tuner says rather than being handed a label.
     readonly property string barReadout: root.detectedHz > 0 ? root.noteLabel + " " + (root.cents > 0 ? "+" : "") + root.cents + "¢" : ""
+    // What is being tuned to, in one line. A custom tuning's name is the only
+    // thing that says what its strings are, so it belongs where the eye
+    // already is -- on the readout -- and not only in a dropdown the player
+    // has to open to read.
+    readonly property string selectionLabel: {
+        var instrument = Tunings.instrumentById(root.selectedInstrument);
+        if (!instrument) {
+            var family = Tunings.familyById(root.selectedFamily);
+            return family ? family.label : "";
+        }
+        var tuning = Tunings.tuningLabel(root.selectedInstrument, root.selectedTuning, root.customTunings);
+        return tuning.length > 0 ? instrument.label + "  ·  " + tuning : instrument.label;
+    }
+    // The same line for the bar, where neither dropdown is visible at all.
+    readonly property string barTooltip: root.barReadout.length > 0 ? root.selectionLabel + "  ·  " + root.barReadout : root.selectionLabel
     // -- input selection ----------------------------------------------------
     // Empty means the PipeWire default source, which is what the detector does
     // with no --target.
@@ -105,10 +120,23 @@ Panel {
     readonly property string renamedInputPath: Quickshell.env("HOME") + "/.config/omarchy-pitchfork/input.json"
     readonly property string legacySettingsPath: Quickshell.env("HOME") + "/.config/omarchy-tuner/settings.json"
     readonly property string legacyInputPath: Quickshell.env("HOME") + "/.config/omarchy-tuner/input.json"
-    // All four reads and the parent-directory creation finish before the first
+    // Tunings the player wrote themselves. Read from its own file rather than
+    // from settings.json: this one is meant to be edited by hand, and mixing it
+    // into the record the panel rewrites on every click would put a merge
+    // between the player's text and their next selection.
+    readonly property string customTuningsPath: Quickshell.env("HOME") + "/.config/omarchy-pitchfork/tunings.json"
+    // Validated entries only, from Tunings.parseCustomTunings. Everything that
+    // resolves a tuning id is passed this list, so an id the file no longer
+    // defines stops resolving and the selection falls back -- which is what
+    // makes deleting an entry safe while it is the one in force.
+    property var customTunings: []
+    // All five reads and the parent-directory creation finish before the first
     // state is applied. That removes the startup race where a missing new file
-    // could install defaults before a legacy input had a chance to load.
+    // could install defaults before a legacy input had a chance to load -- and,
+    // for the custom tunings, where a stored custom id would be normalised away
+    // and then written back as "standard" before its definition had loaded.
     property bool stateDirReady: false
+    property bool customTuningsDone: false
     property bool stateHydrated: false
     property bool currentStateDone: false
     property bool renamedInputDone: false
@@ -181,7 +209,7 @@ Panel {
                 "label": root.sourceLabel(node)
             });
         }
-        return options;
+        return root.qualifyDuplicates(options);
     }
 
     function open() {
@@ -358,6 +386,51 @@ Panel {
         return root.friendlyLabel(node.nickname || node.description || node.name || "Unknown");
     }
 
+    // The part of a PipeWire node name that separates one input of a device
+    // from another: "Mic1" and "Mic2" on a two-channel interface. ALSA reports
+    // the same nickname for both, so this is the only thing that distinguishes
+    // them anywhere in the list.
+    function sourceQualifier(name) {
+        var text = String(name || "");
+        // alsa_input.<device>.HiFi__Mic2__source -> "Mic2"
+        var parts = text.split("__");
+        if (parts.length >= 3)
+            return parts[parts.length - 2];
+
+        var tail = text.split(".").pop();
+        return tail === text ? "" : tail;
+    }
+
+    function labelCount(rows, label) {
+        var total = 0;
+        for (var index = 0; index < rows.length; index++) {
+            if (rows[index].label === label)
+                total++;
+
+        }
+        return total;
+    }
+
+    // Qualify only the labels that actually collide. One input per device is
+    // the common case, and "Scarlett 2i2 USB (Mic1)" is noise when there is no
+    // Mic2 to tell it apart from.
+    function qualifyDuplicates(rows) {
+        var duplicated = [];
+        for (var index = 0; index < rows.length; index++)
+            duplicated.push(root.labelCount(rows, rows[index].label) > 1);
+
+        for (var row = 0; row < rows.length; row++) {
+            if (!duplicated[row])
+                continue;
+
+            var qualifier = root.sourceQualifier(rows[row].value);
+            if (qualifier.length > 0)
+                rows[row].label = rows[row].label + " (" + qualifier + ")";
+
+        }
+        return rows;
+    }
+
     function selectTarget(name) {
         var next = String(name || "");
         if (next === root.selectedTarget)
@@ -393,7 +466,7 @@ Panel {
             "family": id,
             "instrument": root.selectedInstrument,
             "tuning": root.selectedTuning
-        }));
+        }, root.customTunings));
     }
 
     function selectInstrument(id) {
@@ -401,7 +474,7 @@ Panel {
             "family": root.selectedFamily,
             "instrument": id,
             "tuning": root.selectedTuning
-        }));
+        }, root.customTunings));
     }
 
     function selectTuning(id) {
@@ -409,7 +482,7 @@ Panel {
             "family": root.selectedFamily,
             "instrument": root.selectedInstrument,
             "tuning": id
-        }));
+        }, root.customTunings));
     }
 
     // Dropping running and raising it again in one block coalesces into no
@@ -472,7 +545,7 @@ Panel {
 
     function applyStoredSettings(stored, applyEffects) {
         var target = String(root.hasOwn(stored, "target") ? (stored.target || "") : "");
-        var selection = Tunings.normalize(stored);
+        var selection = Tunings.normalize(stored, root.customTunings);
         var targetChanged = target !== root.selectedTarget;
         var tuningChanged = selection.family !== root.selectedFamily || selection.instrument !== root.selectedInstrument || selection.tuning !== root.selectedTuning;
 
@@ -516,8 +589,39 @@ Panel {
         mergeStateFile.setText(serialized);
     }
 
+    function customTuningsSignature(list) {
+        return JSON.stringify(list || []);
+    }
+
+    // The whole interface to custom tunings is editing the file, so a save has
+    // to land without a shell restart -- and the first read has to complete
+    // before settings hydration, or a stored custom id would be normalised
+    // away and written back as the default before its definition arrived.
+    function applyCustomTunings(raw) {
+        var parsed = Tunings.parseCustomTunings(String(raw || ""));
+        var wasDone = root.customTuningsDone;
+        root.customTuningsDone = true;
+        if (wasDone && root.customTuningsSignature(parsed) === root.customTuningsSignature(root.customTunings))
+            return ;
+
+        root.customTunings = parsed;
+        if (!root.stateHydrated) {
+            root.finishStateHydration();
+            return ;
+        }
+
+        // The selection may name a tuning the file no longer defines, or one
+        // whose strings changed under it. Re-normalising against the new list
+        // is what falls back; the fresh pass is what stops the strip crediting
+        // strings that were ticked off against the old set. Deliberately not
+        // persisted: a file saved half-written must not overwrite the player's
+        // stored choice with the fallback it produced on the way through.
+        root.applyStoredSettings(root.settingsRecord(), false);
+        root.beginFreshPass();
+    }
+
     function finishStateHydration() {
-        if (root.stateHydrated || !root.stateDirReady || !root.currentStateDone || !root.renamedInputDone || !root.legacySettingsDone || !root.legacyInputDone)
+        if (root.stateHydrated || !root.stateDirReady || !root.customTuningsDone || !root.currentStateDone || !root.renamedInputDone || !root.legacySettingsDone || !root.legacyInputDone)
             return ;
 
         // Prefer the current file, then the newest legacy schema. input.json
@@ -809,6 +913,19 @@ Panel {
         }
     }
 
+    // Optional and hand-written: most installs never create it, so a missing
+    // file is the ordinary case rather than an error worth printing.
+    FileView {
+        id: customTuningsFile
+
+        path: root.customTuningsPath
+        watchChanges: true
+        printErrors: false
+        onLoaded: root.applyCustomTunings(text())
+        onFileChanged: reload()
+        onLoadFailed: root.applyCustomTunings("")
+    }
+
     KeyboardPanel {
         id: panel
 
@@ -884,6 +1001,27 @@ Panel {
                         anchors.rightMargin: Style.space(14)
                         spacing: Style.space(8)
 
+                        // Which tuning the note below is being measured
+                        // against. Small and dim: it is the caption on the
+                        // reading, not a second thing to read.
+                        Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            visible: root.selectionLabel.length > 0
+                            text: root.selectionLabel
+                            color: root.readingInTune ? Color.accent : root.barForeground
+                            opacity: 0.7
+                            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                            elide: Text.ElideRight
+                        }
+
+                        // The one thing the player looks at with both hands on
+                        // the instrument and the panel several feet away, so it
+                        // is sized for that rather than for the panel's own
+                        // type scale.
                         Text {
                             textFormat: Text.PlainText
                             width: parent.width
@@ -891,7 +1029,7 @@ Panel {
                             text: root.noteLabel
                             color: root.readingInTune ? Color.accent : root.barForeground
                             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                            font.pixelSize: Math.round(Style.font.subtitle * 2.2)
+                            font.pixelSize: Math.round(Style.font.subtitle * 3.6)
                             font.bold: true
                         }
 
@@ -905,7 +1043,7 @@ Panel {
                             id: meter
 
                             width: parent.width
-                            height: Style.space(22)
+                            height: Style.space(28)
                             radius: Style.cornerRadius
                             color: Util.alpha(root.barForeground, 0.1)
 
@@ -977,7 +1115,7 @@ Panel {
                             color: root.barForeground
                             opacity: 0.85
                             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                            font.pixelSize: Style.font.body
+                            font.pixelSize: Style.font.subtitle
                             wrapMode: Text.WordWrap
                         }
 
@@ -1019,7 +1157,7 @@ Panel {
                             readonly property bool live: pill.current && root.detectedHz > 0 && root.readingInTune
 
                             width: (targetStrip.width - targetStrip.spacing * Math.max(0, root.targets.length - 1)) / Math.max(1, root.targets.length)
-                            height: Style.space(26)
+                            height: Style.space(30)
                             radius: Style.cornerRadius
                             color: pill.live ? Util.alpha(Color.accent, 0.34) : (pill.checked ? Util.alpha(Color.accent, 0.14) : (pill.current ? Util.alpha(root.barForeground, 0.14) : Util.alpha(root.barForeground, 0.05)))
                             border.width: pill.current ? Math.max(1, Style.normalBorderWidth) : 0

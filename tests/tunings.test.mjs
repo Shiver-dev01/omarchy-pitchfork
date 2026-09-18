@@ -471,3 +471,140 @@ test("resolve tolerates a missing or malformed target list", () => {
         assert.equal(resolved.targetIndex, -1);
     }
 });
+
+// -- user-defined tunings ---------------------------------------------------
+
+const openG = {
+    id: "open-g",
+    label: "Open G",
+    strings: ["D2", "G2", "D3", "G3", "B3", "D4"]
+};
+
+test("a custom voicing is offered on instruments with that many strings", () => {
+    const custom = Tunings.parseCustomTunings([openG]);
+    assert.equal(custom.length, 1);
+    assert.ok(values(Tunings.tuningOptions("guitar6", custom)).includes("open-g"));
+    assert.ok(values(Tunings.tuningOptions("bass6", custom)).includes("open-g"));
+    // Seven and four strings are not six.
+    assert.ok(!values(Tunings.tuningOptions("guitar7", custom)).includes("open-g"));
+    assert.ok(!values(Tunings.tuningOptions("bass4", custom)).includes("open-g"));
+});
+
+test("an explicit instruments list overrides the string-count match", () => {
+    const custom = Tunings.parseCustomTunings([Object.assign({}, openG, { instruments: ["guitar6"] })]);
+    assert.ok(values(Tunings.tuningOptions("guitar6", custom)).includes("open-g"));
+    assert.ok(!values(Tunings.tuningOptions("bass6", custom)).includes("open-g"));
+});
+
+test("a custom voicing is the string set the readout snaps to", () => {
+    const custom = Tunings.parseCustomTunings([openG]);
+    assert.deepEqual(Tunings.stringsFor("guitar6", "open-g", custom), openG.strings);
+    // And without the custom list in hand, the id resolves to nothing and the
+    // instrument's own strings are what is left.
+    assert.deepEqual(Tunings.stringsFor("guitar6", "open-g"), Tunings.instrumentById("guitar6").strings);
+});
+
+test("a custom shift moves every string", () => {
+    const custom = Tunings.parseCustomTunings({ tunings: [{ id: "drop-2", label: "Two down", shift: -4 }] });
+    assert.equal(custom.length, 1);
+    assert.deepEqual(Tunings.stringsFor("guitar6", "drop-2", custom), ["C2", "F2", "A#2", "D#3", "G3", "C4"]);
+    // No instruments named and no voicing to size: it applies to all of them.
+    assert.ok(values(Tunings.tuningOptions("bass4", custom)).includes("drop-2"));
+});
+
+test("a custom label falls back to the id and appears in the menu", () => {
+    const custom = Tunings.parseCustomTunings([{ id: "nameless", strings: ["E2", "A2", "D3", "G3"] }]);
+    assert.ok(labels(Tunings.tuningOptions("bass4", custom)).includes("nameless"));
+});
+
+test("unusable custom entries are dropped, not thrown", () => {
+    const rejected = [
+        {},                                                  // no id
+        { id: "", strings: ["E2"] },                          // empty id
+        { id: "has space", strings: ["E2"] },                 // id is not a slug
+        { id: "standard", strings: ["E2"] },                  // collides with a built-in
+        { id: "dadgad", shift: -1 },                          // collides with a built-in
+        { id: "bad-note", strings: ["E2", "H9"] },            // H is not a note
+        { id: "empty", strings: [] },                         // nothing to tune to
+        { id: "no-transform", label: "Nothing" },             // neither strings nor shift
+        { id: "zero", shift: 0 },                             // a shift that shifts nothing
+        { id: "huge", shift: 40 },                            // past two octaves
+        { id: "fractional", shift: -1.5 },                    // not whole semitones
+        { id: "ghost", strings: ["E2"], instruments: ["lute"] }, // no such instrument
+        "not an object",
+        null
+    ];
+    assert.deepEqual(Tunings.parseCustomTunings(rejected), []);
+});
+
+test("a duplicate custom id keeps only the first entry", () => {
+    const custom = Tunings.parseCustomTunings([
+        { id: "open-g", label: "First", strings: ["D2", "G2", "D3", "G3", "B3", "D4"] },
+        { id: "open-g", label: "Second", strings: ["E2", "A2", "D3", "G3", "B3", "E4"] }
+    ]);
+    assert.equal(custom.length, 1);
+    assert.equal(custom[0].label, "First");
+});
+
+test("a malformed tunings file yields no tunings rather than an error", () => {
+    for (const source of ["", "{", "null", "[", '{"tunings": 7}', "42", null, undefined, {}]) {
+        assert.deepEqual(Tunings.parseCustomTunings(source), [], JSON.stringify(source));
+    }
+});
+
+test("a JSON string is accepted as readily as a parsed value", () => {
+    const custom = Tunings.parseCustomTunings(JSON.stringify({ tunings: [openG] }));
+    assert.equal(custom.length, 1);
+    assert.equal(custom[0].id, "open-g");
+});
+
+test("an Object.prototype name is never mistaken for a tuning", () => {
+    // A hand-written or hostile file can legitimately contain these strings.
+    // Lookup must answer "no such tuning" rather than hand back an inherited
+    // function, which every caller that chains off tuningById would then treat
+    // as a tuning object.
+    const custom = Tunings.parseCustomTunings([{ id: "ok", strings: ["E2", "A2", "D3", "G3"] }]);
+    for (const name of ["toString", "constructor", "hasOwnProperty", "valueOf", "__proto__"]) {
+        assert.equal(Tunings.tuningById(name, custom), null, name);
+        assert.deepEqual(Tunings.stringsFor("bass4", name, custom), Tunings.instrumentById("bass4").strings, name);
+    }
+});
+
+test("normalize keeps a custom tuning it is told about and drops one it is not", () => {
+    const custom = Tunings.parseCustomTunings([openG]);
+    const stored = { family: "guitar", instrument: "guitar6", tuning: "open-g" };
+    assert.equal(Tunings.normalize(stored, custom).tuning, "open-g");
+    assert.equal(Tunings.normalize(stored).tuning, Tunings.DEFAULT_TUNING);
+});
+
+test("built-in tunings are unchanged when custom ones are present", () => {
+    const custom = Tunings.parseCustomTunings([openG]);
+    const builtin = values(Tunings.tuningOptions("guitar6"));
+    const withCustom = values(Tunings.tuningOptions("guitar6", custom));
+    assert.deepEqual(withCustom.slice(0, builtin.length), builtin);
+    assert.deepEqual(withCustom.slice(builtin.length), ["open-g"]);
+    assert.deepEqual(Tunings.stringsFor("guitar6", "drop", custom), Tunings.stringsFor("guitar6", "drop"));
+});
+
+test("a voicing is never offered on an instrument with a different string count", () => {
+    // Four notes named against a five-string bass: the voicing would replace
+    // the whole set, so the five-string is dropped rather than shown four
+    // strings that are not the ones in front of the player.
+    const custom = Tunings.parseCustomTunings([{
+        id: "drop-d-bass",
+        label: "Drop D",
+        instruments: ["bass4", "bass5"],
+        strings: ["D1", "A1", "D2", "G2"]
+    }]);
+    assert.equal(custom.length, 1);
+    assert.deepEqual(custom[0].only, ["bass4"]);
+    assert.ok(values(Tunings.tuningOptions("bass4", custom)).includes("drop-d-bass"));
+    assert.ok(!values(Tunings.tuningOptions("bass5", custom)).includes("drop-d-bass"));
+
+    // And when no named instrument has that many strings, the entry is gone.
+    assert.deepEqual(Tunings.parseCustomTunings([{
+        id: "impossible",
+        instruments: ["bass4"],
+        strings: ["E2", "A2", "D3", "G3", "B3", "E4"]
+    }]), []);
+});
